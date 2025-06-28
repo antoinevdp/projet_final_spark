@@ -1,4 +1,3 @@
-```markdown
 # traffic-accident-analytics
 
 ## Overview
@@ -89,29 +88,27 @@ traffic-accident-analytics/
 
 1. **Data Ingestion**: Load raw data into HDFS
    ```bash
-   spark-submit feeder.py
+   spark-submit --properties-file spark-config.conf feeder.py
    ```
 
 2. **Data Preprocessing**: Clean and partition data into Hive tables
    ```bash
-   spark-submit preprocessor.py
+   spark-submit --properties-file spark-config.conf preprocessor.py
    ```
 
 3. **Generate Analytics**: Create aggregated insights and store in MySQL
    ```bash
-   spark-submit --jars mysql-connector-j-9.3.0.jar datamart.py
+   spark-submit --properties-file spark-config.conf datamart.py
    ```
 
 4. **Train ML Models**: Apply machine learning for predictive analytics
    ```bash
-   spark-submit ml.py
+   spark-submit --properties-file spark-config.conf ml.py
    ```
 
 5. **Start API Server**: Launch FastAPI for data access
    ```bash
-   python run_api.py
-   # or
-   uvicorn api:app --reload
+   uvicorn api:app --reload --host 0.0.0.0 --port 8000
    ```
 
 6. **Access API Documentation**: Visit `http://localhost:8000/docs` for interactive API documentation
