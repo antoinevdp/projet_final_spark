@@ -1,142 +1,211 @@
-from fastapi import FastAPI, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
-from sqlalchemy import text
-from database import get_db, get_table_names, get_table, engine
-import pandas as pd
-from typing import Optional, Dict, Any, List
-import json
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, count, desc, asc
+from typing import Optional, List, Dict, Any
+import os
+from dotenv import load_dotenv
 
-app = FastAPI(title="MariaDB Data API", description="API to display data from MariaDB tables")
+load_dotenv()
+
+app = FastAPI(
+    title="Traffic Accident Analytics API",
+    description="REST API for traffic accident data analytics using Apache Spark",
+    version="1.0.0"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# Initialize Spark Session
+def get_spark_session():
+    if not hasattr(get_spark_session, "spark"):
+        get_spark_session.spark = (SparkSession.builder
+                                   .appName("TrafficAccidentAPI")
+                                   .config("spark.jars", "mysql-connector-j-9.3.0.jar")
+                                   .config("spark.sql.adaptive.enabled", "true")
+                                   .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
+                                   .enableHiveSupport()
+                                   .getOrCreate())
+        get_spark_session.spark.sparkContext.setLogLevel("WARN")
+    return get_spark_session.spark
+
+
+# Database configuration
+jdbc_url = f"jdbc:mysql://{os.getenv('DB_HOST', 'localhost')}:{os.getenv('DB_PORT', '3306')}/{os.getenv('DB_NAME', 'accidents')}"
+connection_properties = {
+    "user": os.getenv('DB_USER'),
+    "password": os.getenv('DB_PASSWORD'),
+    "driver": "com.mysql.cj.jdbc.Driver"
+}
+
+
+def read_table_with_spark(table_name: str) -> "DataFrame":
+    """Read table using Spark from MySQL"""
+    spark = get_spark_session()
+    try:
+        df = spark.read.jdbc(
+            url=jdbc_url,
+            table=table_name,
+            properties=connection_properties
+        )
+        return df
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Table '{table_name}' not found or connection error: {str(e)}")
+
+
+def get_available_tables() -> List[str]:
+    """Get list of available tables from MySQL"""
+    spark = get_spark_session()
+    try:
+        # Get tables from information_schema
+        tables_df = spark.read.jdbc(
+            url=jdbc_url,
+            table="(SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE()) as tables",
+            properties=connection_properties
+        )
+        return [row.table_name for row in tables_df.collect()]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching tables: {str(e)}")
 
 
 @app.get("/")
-def root():
-    return {"message": "MariaDB Data API",
-            "endpoints": ["/tables", "/tables/{table_name}", "/tables/{table_name}/data"]}
+async def root():
+    return {
+        "message": "Traffic Accident Analytics API powered by Apache Spark",
+        "version": "1.0.0",
+        "endpoints": {
+            "tables": "/tables",
+            "documentation": "/docs",
+            "health": "/health"
+        }
+    }
+
+
+@app.get("/health")
+async def health_check():
+    try:
+        spark = get_spark_session()
+        spark.sql("SELECT 1").collect()
+        return {"status": "healthy", "spark": "connected"}
+    except Exception as e:
+        return {"status": "unhealthy", "error": str(e)}
 
 
 @app.get("/tables")
-def list_tables():
-    """Get list of all tables in the database"""
+async def list_tables():
+    """List all available tables"""
     try:
-        tables = get_table_names()
-        return {"tables": tables}
+        tables = get_available_tables()
+        return {
+            "tables": tables,
+            "count": len(tables)
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/tables/{table_name}")
-def get_table_info(table_name: str):
-    """Get information about a specific table (columns, types, etc.)"""
+async def get_table_info(table_name: str):
+    """Get table schema and basic information"""
     try:
-        table = get_table(table_name)
-        if table is None:
-            raise HTTPException(status_code=404, detail=f"Table '{table_name}' not found")
+        df = read_table_with_spark(table_name)
 
-        columns_info = []
-        for column in table.columns:
-            columns_info.append({
-                "name": column.name,
-                "type": str(column.type),
-                "nullable": column.nullable,
-                "primary_key": column.primary_key,
-                "autoincrement": column.autoincrement
+        # Get schema information
+        schema_info = []
+        for field in df.schema.fields:
+            schema_info.append({
+                "column": field.name,
+                "type": str(field.dataType),
+                "nullable": field.nullable
             })
+
+        # Get row count
+        row_count = df.count()
 
         return {
             "table_name": table_name,
-            "columns": columns_info,
-            "total_columns": len(columns_info)
+            "row_count": row_count,
+            "column_count": len(schema_info),
+            "schema": schema_info
         }
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/tables/{table_name}/data")
-def get_table_data(
+async def get_table_data(
         table_name: str,
-        limit: Optional[int] = Query(100, ge=1, le=1000, description="Number of records to return"),
-        offset: Optional[int] = Query(0, ge=0, description="Number of records to skip"),
-        db: Session = Depends(get_db)
+        limit: int = Query(100, ge=1, le=1000, description="Number of rows to return"),
+        offset: int = Query(0, ge=0, description="Number of rows to skip"),
+        sort_by: Optional[str] = Query(None, description="Column to sort by"),
+        sort_order: str = Query("asc", regex="^(asc|desc)$", description="Sort order")
 ):
-    """Get data from a specific table with pagination"""
+    """Get table data with pagination and sorting"""
     try:
-        # Check if table exists
-        table = get_table(table_name)
-        if table is None:
-            raise HTTPException(status_code=404, detail=f"Table '{table_name}' not found")
+        df = read_table_with_spark(table_name)
 
-        # Build query with pagination
-        query = f"SELECT * FROM {table_name} LIMIT {limit} OFFSET {offset}"
+        # Apply sorting if specified
+        if sort_by:
+            if sort_by not in df.columns:
+                raise HTTPException(status_code=400, detail=f"Column '{sort_by}' not found")
 
-        # Execute query using pandas for easier JSON serialization
-        df = pd.read_sql(query, engine)
+            if sort_order == "desc":
+                df = df.orderBy(desc(sort_by))
+            else:
+                df = df.orderBy(asc(sort_by))
 
-        # Convert DataFrame to records
-        records = df.to_dict('records')
+        # Apply pagination
+        paginated_df = df.offset(offset).limit(limit)
 
-        # Get total count
-        count_query = f"SELECT COUNT(*) as total FROM {table_name}"
-        total_count = pd.read_sql(count_query, engine)['total'].iloc[0]
+        # Convert to list of dictionaries
+        data = []
+        for row in paginated_df.collect():
+            data.append(row.asDict())
+
+        # Get total count for pagination info
+        total_count = df.count()
 
         return {
             "table_name": table_name,
-            "data": records,
+            "data": data,
             "pagination": {
-                "limit": limit,
+                "total_rows": total_count,
+                "returned_rows": len(data),
                 "offset": offset,
-                "total_records": int(total_count),
-                "returned_records": len(records)
+                "limit": limit,
+                "has_more": offset + limit < total_count
             }
         }
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/tables/{table_name}/search")
-def search_table_data(
-        table_name: str,
-        column: str,
-        value: str,
-        limit: Optional[int] = Query(100, ge=1, le=1000),
-        db: Session = Depends(get_db)
-):
-    """Search for records in a table based on column value"""
+@app.get("/spark/info")
+async def get_spark_info():
+    """Get Spark session information"""
     try:
-        # Check if table exists
-        table = get_table(table_name)
-        if table is None:
-            raise HTTPException(status_code=404, detail=f"Table '{table_name}' not found")
-
-        # Check if column exists
-        if column not in [col.name for col in table.columns]:
-            raise HTTPException(status_code=400, detail=f"Column '{column}' not found in table '{table_name}'")
-
-        # Build search query
-        query = f"SELECT * FROM {table_name} WHERE {column} LIKE '%{value}%' LIMIT {limit}"
-
-        # Execute query
-        df = pd.read_sql(query, engine)
-        records = df.to_dict('records')
-
+        spark = get_spark_session()
         return {
-            "table_name": table_name,
-            "search_criteria": {"column": column, "value": value},
-            "data": records,
-            "found_records": len(records)
+            "spark_version": spark.version,
+            "app_name": spark.sparkContext.appName,
+            "master": spark.sparkContext.master,
+            "executor_memory": spark.conf.get("spark.executor.memory", "Not set"),
+            "driver_memory": spark.conf.get("spark.driver.memory", "Not set"),
+            "sql_adaptive_enabled": spark.conf.get("spark.sql.adaptive.enabled", "false")
         }
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+# Graceful shutdown
+@app.on_event("shutdown")
+async def shutdown_event():
+    if hasattr(get_spark_session, "spark"):
+        get_spark_session.spark.stop()

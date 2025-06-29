@@ -9,8 +9,8 @@ load_dotenv()
 
 jdbc_url = "jdbc:mysql://localhost:3306/accidents"
 properties = {
-    "user": os.getenv('USER'),
-    "password": os.getenv('PASSWORD'),
+    "user": os.getenv('DB_USER'),
+    "password": os.getenv('DB_PASSWORD'),
     "driver": "com.mysql.cj.jdbc.Driver",
 }
 
