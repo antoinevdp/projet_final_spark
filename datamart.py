@@ -90,23 +90,23 @@ def weather_impact_analysis(spark, accidents_df, weather_df):
     weather_df.createOrReplaceTempView("weather")
     query = """SELECT 
                    CASE 
-                       WHEN w.Temperature_F < 32 THEN 'Freezing'
-                       WHEN w.Temperature_F BETWEEN 32 AND 50 THEN 'Cold'
-                       WHEN w.Temperature_F BETWEEN 50 AND 70 THEN 'Moderate'
-                       WHEN w.Temperature_F BETWEEN 70 AND 85 THEN 'Warm'
+                       WHEN w.`Temperature(F)` < 32 THEN 'Freezing'
+                       WHEN w.`Temperature(F)` BETWEEN 32 AND 50 THEN 'Cold'
+                       WHEN w.`Temperature(F)` BETWEEN 50 AND 70 THEN 'Moderate'
+                       WHEN w.`Temperature(F)` BETWEEN 70 AND 85 THEN 'Warm'
                        ELSE 'Hot'
                    END as temperature_range,
                    CASE
-                       WHEN w.Visibility_mi < 1 THEN 'Poor'
-                       WHEN w.Visibility_mi BETWEEN 1 AND 5 THEN 'Moderate'
+                       WHEN w.`Visibility(mi)` < 1 THEN 'Poor'
+                       WHEN w.`Visibility(mi)` BETWEEN 1 AND 5 THEN 'Moderate'
                        ELSE 'Good'
                    END as visibility_condition,
                    COUNT(DISTINCT a.ID) as accident_count,
                    AVG(a.Severity) as avg_severity,
-                   AVG(w.Wind_Speed_mph) as avg_wind_speed
+                   AVG(w.`Wind_Speed(mph)`) as avg_wind_speed
                FROM accidents a
                JOIN weather w ON a.ID = w.ID
-               WHERE w.Temperature_F IS NOT NULL AND w.Visibility_mi IS NOT NULL
+               WHERE w.`Temperature(F)` IS NOT NULL AND w.`Visibility(mi)` IS NOT NULL
                GROUP BY 1, 2
                ORDER BY accident_count DESC"""
     return spark.sql(query)
@@ -157,6 +157,8 @@ if __name__ == "__main__":
     df7 = weather_impact_analysis(spark, accidents_df, weather_df)
     save_to_mysql(spark, df7, "weather_impact_analysis", properties)
 
+    save_to_mysql(spark, accidents_df, "accidents", properties)
+    save_to_mysql(spark, weather_df, "weather", properties)
 
     print("All aggregations completed and saved to MySQL!")
 
